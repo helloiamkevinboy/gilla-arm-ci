@@ -1,0 +1,114 @@
+name: gilla-dump
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: "Direct download URL for the game APK"
+        required: true
+      android:
+        description: "redroid android version"
+        required: false
+        default: "14.0.0-latest"
+
+jobs:
+  dump:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host info
+        run: |
+          uname -a
+          echo "arch: $(dpkg --print-architecture)"
+          echo "--- binder modules available? ---"
+          find /lib/modules/$(uname -r) -name '*binder*' 2>/dev/null || true
+
+      - name: Load binder + install tools
+        run: |
+          sudo modprobe binder_linux devices=binder,hwbinder,vndbinder 2>&1 || echo "modprobe binder_linux FAILED"
+          sudo modprobe ashmem_linux 2>&1 || echo "(ashmem not needed on new kernels)"
+          echo "--- binder devices ---"
+          ls -l /dev/binder* /dev/*binder* 2>/dev/null || echo "NO binder devices -> redroid will fail"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq adb xz-utils
+          python3 -m pip install --quiet frida-tools
+          frida --version
+
+      - name: Start redroid (native arm64 Android)
+        run: |
+          mkdir -p ~/rd
+          docker run -itd --rm --privileged \
+            --name redroid \
+            -v ~/rd:/data \
+            -p 5555:5555 \
+            redroid/redroid:${{ github.event.inputs.android }} \
+            androidboot.redroid_gpu_mode=guest \
+            androidboot.redroid_width=720 androidboot.redroid_height=1280
+          echo "waiting for container..."
+          sleep 15
+          docker ps -a
+          echo "--- redroid logs ---"; docker logs redroid 2>&1 | tail -30 || true
+
+      - name: ADB connect + wait for boot
+        run: |
+          adb start-server
+          adb connect localhost:5555 || true
+          sleep 3
+          adb connect localhost:5555
+          echo "waiting boot_completed..."
+          for i in $(seq 1 60); do
+            b=$(adb -s localhost:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            echo "try $i: boot=$b"
+            [ "$b" = "1" ] && break
+            sleep 5
+          done
+          echo "=== ABI (want arm64-v8a, 64-bit) ==="
+          adb -s localhost:5555 shell getprop ro.product.cpu.abi
+          adb -s localhost:5555 shell getprop ro.product.cpu.abilist64
+
+      - name: Install game
+        run: |
+          echo "downloading apk..."
+          curl -fL "${{ github.event.inputs.apk_url }}" -o game.apk
+          ls -la game.apk
+          file game.apk
+          adb -s localhost:5555 install -r -g game.apk
+
+      - name: frida-server + dump
+        run: |
+          FV=$(frida --version 2>/dev/null || echo 17.2.7)
+          echo "frida version: $FV"
+          curl -fL -o fs.xz "https://github.com/frida/frida/releases/download/${FV}/frida-server-${FV}-android-arm64.xz" || \
+            curl -fL -o fs.xz "https://github.com/frida/frida/releases/download/17.2.7/frida-server-17.2.7-android-arm64.xz"
+          xz -d fs.xz
+          adb -s localhost:5555 root || true
+          sleep 3
+          adb -s localhost:5555 connect localhost:5555 || true
+          adb -s localhost:5555 push fs /data/local/tmp/frida-server
+          adb -s localhost:5555 shell chmod 755 /data/local/tmp/frida-server
+          adb -s localhost:5555 shell "/data/local/tmp/frida-server &" &
+          sleep 5
+          echo "=== frida-ps ==="
+          frida-ps -H localhost:5555 2>&1 | head -5 || true
+          echo "=== running dumper ==="
+          python3 driver.py localhost:5555 com.playgilla.gilla agent.js 2>&1 | tail -40
+
+      - name: Pull dump
+        if: always()
+        run: |
+          adb -s localhost:5555 shell "cat /data/data/com.playgilla.gilla/files/gilla_dump.cs 2>/dev/null; cat /data/local/tmp/gilla_dump.cs 2>/dev/null" > /dev/null 2>&1 || true
+          for p in /data/local/tmp/gilla_dump.cs /data/data/com.playgilla.gilla/files/gilla_dump.cs /sdcard/Android/data/com.playgilla.gilla/files/gilla_dump.cs; do
+            adb -s localhost:5555 pull "$p" gilla_dump.cs 2>/dev/null && echo "pulled from $p" && break
+          done
+          ls -la gilla_dump.cs 2>/dev/null && head -40 gilla_dump.cs || echo "no dump file produced"
+          echo "--- redroid logs tail ---"; docker logs redroid 2>&1 | tail -20 || true
+
+      - name: Upload dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilla-dump
+          path: |
+            gilla_dump.cs
+          if-no-files-found: warn
