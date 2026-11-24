@@ -78,44 +78,82 @@ function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0
 function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
 function readStrAt(p) { if (!looksPtr(p)) return null; try { return p.readCString(); } catch (e) { return null; } }
 function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
+function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0 && p.compare(ptr('0x8000000000')) < 0; } catch (e) { return false; } }
+function inModule(p) { try { return p.compare(mod.base) >= 0 && p.compare(mod.base.add(mod.size)) < 0; } catch (e) { return false; } }
+function rdStr(p) { if (!looksPtr(p)) return null; try { var s = p.readCString(); if (s && s.length > 0 && s.length < 120 && /^[\x20-\x7e]+$/.test(s)) return s; } catch (e) {} return null; }
 function calibrateAndDump() {
-  console.log('[cal] get_corlib -> ' + F.get_corlib + ' corlib=' + corlib);
+  console.log('[cal] get_corlib -> ' + F.get_corlib + ' corlib=' + corlib + ' modbase=' + mod.base + ' modsize=0x' + mod.size.toString(16));
 
-  // image_get_class = accessor with most distinct class ptrs
+  // image_get_class accessor
   var accGi = -1, accBest = 0;
-  for (var i = 3; i < SORTED.length; i++) {
-    if (isDanger(i)) continue;
-    try { var gc = nf(i, 'pointer', ['pointer', 'uint32']), seen = {}, vv = 0; for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (looksPtr(k)) { vv++; seen[k.toString()] = 1; } } if (vv >= 14 && Object.keys(seen).length > accBest) { accBest = Object.keys(seen).length; accGi = i; } } catch (e) {}
-  }
+  for (var i = 3; i < SORTED.length; i++) { if (isDanger(i)) continue; try { var gc = nf(i, 'pointer', ['pointer', 'uint32']), seen = {}, vv = 0; for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (looksPtr(k)) { vv++; seen[k.toString()] = 1; } } if (vv >= 14 && Object.keys(seen).length > accBest) { accBest = Object.keys(seen).length; accGi = i; } } catch (e) {} }
   F.image_get_class = accGi;
   var getClass = nf(accGi, 'pointer', ['pointer', 'uint32']);
   console.log('[cal] image_get_class=' + accGi + ' distinct=' + accBest);
 
   var ks = [];
-  for (var c = 0; c < 400 && ks.length < 16; c++) { var kk = getClass(corlib, c); if (looksPtr(kk)) ks.push(kk); }
+  for (var c = 0; c < 2000 && ks.length < 80; c++) { var k = getClass(corlib, c); if (looksPtr(k)) ks.push(k); }
+  console.log('[cal] classes sampled=' + ks.length);
 
-  // FULL-RANGE class_get_name search: NO order-based danger filter (order is shuffled).
-  // Call (klass)->char*; the real one returns many distinct readable names.
-  // Progress log every 15 indices so a blocking export reveals itself on timeout.
-  var known = {}; known[F.get_corlib] = 1; known[accGi] = 1;
-  var nameIdx = -1, nameBest = 0;
-  for (var i2 = 3; i2 < SORTED.length; i2++) {
-    if (i2 % 15 === 0) console.log('[cal] name-probe at ' + i2);
-    if (known[i2]) continue;
-    try {
-      var f = nf(i2, 'pointer', ['pointer']), names = {}, bad = 0;
-      for (var y = 0; y < ks.length; y++) { var s = readStr(f(ks[y])); if (isIdent(s)) names[s] = 1; else bad++; }
-      var d = Object.keys(names).length;
-      if (d >= 10 && bad <= 3) { console.log('[cal] NAME candidate i=' + i2 + ' distinct=' + d + ' eg=' + JSON.stringify(Object.keys(names).slice(0, 5))); if (d > nameBest) { nameBest = d; nameIdx = i2; } }
-    } catch (e) {}
+  // dump the struct interpretation for a few classes
+  function dumpStruct(tag, obj, maxoff) {
+    var out = [];
+    for (var off = 0; off < maxoff; off += PS) {
+      var line = '0x' + off.toString(16) + ':';
+      var p; try { p = obj.add(off).readPointer(); } catch (e) { out.push(line + 'ERR'); continue; }
+      var u = obj.add(off).readU32();
+      var s = rdStr(p);
+      if (s) line += '"' + s + '"';
+      else if (inModule(p)) line += 'CODE+0x' + p.sub(mod.base).toString(16);
+      else if (looksPtr(p)) { var inner = null; try { inner = p.readPointer(); } catch (e) {} line += 'ptr' + (looksPtr(inner) ? (rdStr(inner) ? '->"' + rdStr(inner) + '"' : '->ptr') : ''); }
+      else line += 'u32=' + u;
+      out.push(line);
+    }
+    console.log('[map] ' + tag + ' ' + out.join(' '));
   }
-  console.log('[cal] class_get_name=' + nameIdx + ' distinct=' + nameBest);
-  if (nameIdx < 0) { send({ error: 'class_get_name not found in full scan', F: F, accGi: accGi }); return; }
-  F.class_get_name = nameIdx;
-  var className = nf(nameIdx, 'pointer', ['pointer']);
-  console.log('[cal] sample names: ' + ks.slice(0, 10).map(function (k) { return readStr(className(k)); }).join(', '));
 
-  send({ dumped: false, note: 'class_get_name identified', image_get_class: accGi, class_get_name: nameIdx, F: F });
+  dumpStruct('class[0]', ks[0], 0xb0);
+  dumpStruct('class[20]', ks[20], 0xb0);
+  dumpStruct('class[40]', ks[40], 0xb0);
+
+  // find a methods-array: (countOff u16, arrOff ptr) where arr has `count` MethodInfo* each pointing to a struct w/ a CODE ptr
+  var found = [];
+  for (var coff = 0x80; coff <= 0x140; coff += 2) {
+    for (var aoff = 0x80; aoff <= 0x100; aoff += PS) {
+      var ok = 0;
+      for (var x = 0; x < Math.min(ks.length, 30); x++) {
+        try {
+          var cnt = ks[x].add(coff).readU16();
+          var arr = ks[x].add(aoff).readPointer();
+          if (cnt > 0 && cnt < 3000 && looksPtr(arr)) {
+            var m0 = arr.readPointer();
+            if (looksPtr(m0)) ok++;
+          }
+        } catch (e) {}
+      }
+      if (ok >= 20) found.push('cnt@0x' + coff.toString(16) + '/arr@0x' + aoff.toString(16) + '(ok=' + ok + ')');
+    }
+  }
+  console.log('[map] methods-array candidates: ' + found.slice(0, 20).join(' '));
+
+  // for the first class with cnt>0 at a plausible pair, dump a MethodInfo struct
+  // try the first candidate
+  if (found.length) {
+    var m = found[0].match(/cnt@(0x[0-9a-f]+)\/arr@(0x[0-9a-f]+)/);
+    var coff = parseInt(m[1], 16), aoff = parseInt(m[2], 16);
+    for (var x = 0; x < ks.length; x++) {
+      try {
+        var cnt = ks[x].add(coff).readU16();
+        var arr = ks[x].add(aoff).readPointer();
+        if (cnt > 0 && cnt < 3000 && looksPtr(arr)) {
+          var mi = arr.readPointer();
+          if (looksPtr(mi)) { console.log('[map] class[' + x + '] method_count=' + cnt + ' methods=' + arr + ' mi0=' + mi); dumpStruct('MethodInfo[0]', mi, 0x60); break; }
+        }
+      } catch (e) {}
+    }
+  }
+
+  send({ error: 'structmap complete', image_get_class: accGi });
 }
 
 // ---- bootstrap: wait for module + il2cpp init, then calibrate once ----
