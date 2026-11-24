@@ -74,45 +74,49 @@ function searchFn(hintRef, test) {
   return -1;
 }
 function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0 && p.compare(ptr('0x1000000000000')) < 0; } catch (e) { return false; } }
-function inModule(p) { try { return p.compare(mod.base) >= 0 && p.compare(mod.base.add(mod.size)) < 0; } catch (e) { return false; } }
-function rdId(p) { if (!looksPtr(p)) return null; try { var s = p.readCString(); if (s && s.length > 0 && s.length < 160 && /^[\x20-\x7e]+$/.test(s)) return s; } catch (e) {} return null; }
-function cell(obj, off) { var p; try { p = obj.add(off).readPointer(); } catch (e) { return 'ERR'; } var s = rdId(p); if (s) return '"' + s + '"'; if (inModule(p)) return 'CODE+' + p.sub(mod.base).toString(16); if (looksPtr(p)) return 'ptr'; return 'u=' + obj.add(off).readU32(); }
-function row(tag, obj, n) { var o = []; for (var i = 0; i < n; i += PS) o.push(i.toString(16) + ':' + cell(obj, i)); console.log('[map] ' + tag + ' ' + o.join(' ')); }
 function calibrateAndDump() {
   console.log('[cal] corlib=' + corlib + ' base=' + mod.base);
   var accGi = -1, accBest = 0;
   for (var i = 3; i < SORTED.length; i++) { if (isDanger(i)) continue; try { var gc = nf(i, 'pointer', ['pointer', 'uint32']), seen = {}, vv = 0; for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (looksPtr(k)) { vv++; seen[k.toString()] = 1; } } if (vv >= 14 && Object.keys(seen).length > accBest) { accBest = Object.keys(seen).length; accGi = i; } } catch (e) {} }
   var getClass = nf(accGi, 'pointer', ['pointer', 'uint32']);
   console.log('[cal] image_get_class=' + accGi);
-
-  // image walk FORWARD ONLY from corlib
-  var STRIDE = 0x48, images = [];
-  for (var f = 0; f < 600; f++) { var img = corlib.add(f * STRIDE); var nm = rdId(img.add(8)); var tc = img.add(0x18).readU32(); if (nm && /^[A-Za-z]/.test(nm) && tc > 0 && tc < 200000) images.push({ img: img, name: nm, tc: tc }); else break; }
-  console.log('[cal] images(fwd)=' + images.length + ': ' + images.map(function (x) { return x.name + '(' + x.tc + ')'; }).slice(0, 30).join(' '));
-
-  // get classes; find ones with method-ish counts
   var ks = [];
-  for (var c = 0; c < 4000 && ks.length < 60; c++) { var k = getClass(corlib, c); if (looksPtr(k)) ks.push(k); }
+  for (var c = 0; c < 400 && ks.length < 16; c++) { var k = getClass(corlib, c); if (looksPtr(k)) ks.push(k); }
 
-  // dump a few full class structs
-  row('class[20]', ks[20], 0x108);
-  row('class[25]', ks[25], 0x108);
+  // Search upper indices only (skip crash zone 3..20). Log each index BEFORE calling
+  // so a new crasher is pinpointed. Validate against real class pointers.
+  var LO = 21;
 
-  // for class[20], follow every ptr offset one level: dump arr[0] struct (to find MethodInfo/FieldInfo)
-  var kk = ks[25];
-  for (var off = 0x40; off <= 0x100; off += PS) {
+  // class_get_name: (klass)->char*, many distinct readable names
+  var nameIdx = -1, nameBest = 0;
+  for (var i2 = LO; i2 < SORTED.length; i2++) {
+    console.log('[probe] name ' + i2);
+    try { var f = nf(i2, 'pointer', ['pointer']), nm = {}, bad = 0; for (var y = 0; y < ks.length; y++) { var s = readStr(f(ks[y])); if (isIdent(s)) nm[s] = 1; else bad++; } var d = Object.keys(nm).length; if (d >= 10 && bad <= 3) { console.log('[cal] NAME i=' + i2 + ' d=' + d + ' eg=' + JSON.stringify(Object.keys(nm).slice(0, 5))); if (d > nameBest) { nameBest = d; nameIdx = i2; } } } catch (e) {}
+  }
+  console.log('[cal] class_get_name=' + nameIdx + ' d=' + nameBest);
+  if (nameIdx < 0) { send({ error: 'class_get_name not found >=21', accGi: accGi }); return; }
+  var className = nf(nameIdx, 'pointer', ['pointer']);
+
+  // class_get_methods: (klass,&iter)->MethodInfo*; iterate, validate via method_get_name
+  var methIdx = -1, mnameIdx = -1;
+  for (var i3 = LO; i3 < SORTED.length && methIdx < 0; i3++) {
+    if (i3 === nameIdx) continue;
+    console.log('[probe] meth ' + i3);
     try {
-      var arr = kk.add(off).readPointer();
-      if (!looksPtr(arr)) continue;
-      var e0 = arr.readPointer();
-      if (looksPtr(e0)) { // array of pointers -> dump *e0
-        row('  @0x' + off.toString(16) + '[0]->', e0, 0x40);
-      } else { // maybe inline struct array -> dump arr directly
-        row('  @0x' + off.toString(16) + '(inline)', arr, 0x40);
+      var gm = nf(i3, 'pointer', ['pointer', 'pointer']);
+      for (var kx = 0; kx < ks.length; kx++) {
+        var it = Memory.alloc(PS); it.writePointer(NULL);
+        var m = gm(ks[kx], it);
+        if (!looksPtr(m)) continue;
+        // find method_get_name: (method)->char* readable
+        var mn = -1;
+        for (var j = LO; j < SORTED.length; j++) { if (j === nameIdx || j === i3) continue; try { var s = readStr(nf(j, 'pointer', ['pointer'])(m)); if (isIdent(s) || s === '.ctor' || s === '.cctor') { mn = j; break; } } catch (e) {} }
+        if (mn >= 0) { methIdx = i3; mnameIdx = mn; break; }
       }
     } catch (e) {}
   }
-  send({ error: 'deepmap complete', images: images.length });
+  console.log('[cal] class_get_methods=' + methIdx + ' method_get_name=' + mnameIdx);
+  send({ note: 'probe done', image_get_class: accGi, class_get_name: nameIdx, class_get_methods: methIdx, method_get_name: mnameIdx });
 }
 
 // ---- bootstrap: wait for module + il2cpp init, then calibrate once ----
