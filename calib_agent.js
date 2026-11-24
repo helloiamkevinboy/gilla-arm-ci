@@ -65,14 +65,6 @@ function findCorlib() {
   return false;
 }
 
-function searchFn(hintRef, test) {
-  var est = (hintRef != null) ? estIdx(hintRef) : (SORTED.length >> 1);
-  var order = [];
-  for (var d = 0; d < SORTED.length; d++) { if (est + d < SORTED.length) order.push(est + d); if (d > 0 && est - d >= 0) order.push(est - d); }
-  for (var k = 0; k < order.length; k++) { var i = order[k]; if (i < 3 || isDanger(i)) continue; try { if (test(i)) return i; } catch (e) {} }
-  return -1;
-}
-function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
 
 function searchFn(hintRef, test) {
   var est = (hintRef != null) ? estIdx(hintRef) : (SORTED.length >> 1);
@@ -86,82 +78,83 @@ function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0
 function calibrateAndDump() {
   console.log('[cal] get_corlib -> ' + F.get_corlib + ' corlib=' + corlib);
 
-  // 1) class_for_each: fires a callback once per class. Detect by "callback fired
-  //    hundreds of times with distinct class-like pointers" — no dependency on other fns.
-  var all = [], cbCount = 0;
-  var cb = new NativeCallback(function (klass, user) { cbCount++; if (looksPtr(klass) && all.length < 400000) all.push(klass); }, 'void', ['pointer', 'pointer']);
-  F.class_for_each = searchFn(27, function (i) {
-    all.length = 0; cbCount = 0;
-    try { nf(i, 'void', ['pointer', 'pointer'])(cb, NULL); } catch (e) { return false; }
-    if (cbCount < 300) return false;
-    var dp = {}; for (var x = 0; x < Math.min(all.length, 60); x++) dp[all[x].toString()] = 1;
-    return Object.keys(dp).length >= 50;
-  });
-  console.log('[cal] class_for_each -> ' + F.class_for_each + ' total classes=' + all.length);
-  if (!have('class_for_each') || all.length === 0) { send({ error: 'no class_for_each (enumeration)', F: F }); return; }
-  var sample = all.slice(0, 200);
+  // ---- DIAGNOSTIC + CALIBRATION, order-independent, data-driven ----
 
-  // 2) class_get_name: distinct readable names over the enumerated classes
-  F.class_get_name = searchFn(48, function (i) {
-    var f = nf(i, 'pointer', ['pointer']), names = {}, bad = 0;
-    for (var x = 0; x < Math.min(sample.length, 60); x++) { var s = readStr(f(sample[x])); if (!isIdent(s)) { bad++; continue; } names[s] = 1; }
-    return bad <= 6 && Object.keys(names).length >= 25;
-  });
-  if (!have('class_get_name')) { send({ error: 'no class_get_name', F: F, total: all.length }); return; }
+  // A) int-returning functions fed corlib (find the real per-image class count)
+  var intc = [];
+  for (var i = 3; i < SORTED.length; i++) { if (isDanger(i)) continue; try { var v = nf(i, 'int', ['pointer'])(corlib); if (v > 5 && v < 4000000) intc.push(i + ':' + v); } catch (e) {} }
+  console.log('[diag] int(corlib): ' + intc.join(' '));
+
+  // B) accessor candidates: (corlib,z)->Il2CppClass* for z in 0..23, tolerate some nulls
+  var accs = [];
+  for (var i = 3; i < SORTED.length; i++) {
+    if (isDanger(i)) continue;
+    try {
+      var gc = nf(i, 'pointer', ['pointer', 'uint32']), v = [], seen = {};
+      for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (looksPtr(k)) { v.push(k); seen[k.toString()] = 1; } }
+      if (v.length >= 14 && Object.keys(seen).length >= 12) { accs.push({ i: i, ks: v }); console.log('[diag] accessor gi=' + i + ' valid=' + v.length + ' distinct=' + Object.keys(seen).length); }
+    } catch (e) {}
+  }
+
+  // C) for each accessor, find class_get_name (distinct readable names)
+  var bestGi = -1, bestNj = -1, bestD = 0;
+  for (var a = 0; a < accs.length; a++) {
+    var ks = accs[a].ks;
+    for (var nj = 3; nj < SORTED.length; nj++) {
+      if (isDanger(nj)) continue;
+      try {
+        var f = nf(nj, 'pointer', ['pointer']), names = {}, bad = 0, nn = Math.min(ks.length, 20);
+        for (var y = 0; y < nn; y++) { var s = readStr(f(ks[y])); if (!isIdent(s)) { bad++; continue; } names[s] = 1; }
+        var d = Object.keys(names).length;
+        if (d >= 8 && bad <= 3) { console.log('[diag] pair gi=' + accs[a].i + ' nj=' + nj + ' distinct=' + d + ' eg=' + JSON.stringify(Object.keys(names).slice(0, 4))); if (d > bestD) { bestD = d; bestGi = accs[a].i; bestNj = nj; } }
+      } catch (e) {}
+    }
+  }
+  console.log('[cal] best image_get_class=' + bestGi + ' class_get_name=' + bestNj + ' distinct=' + bestD);
+  if (bestGi < 0) { send({ error: 'no accessor/name pair', F: F, intc: intc.length }); return; }
+  F.image_get_class = bestGi; F.class_get_name = bestNj;
+  var getClass = nf(F.image_get_class, 'pointer', ['pointer', 'uint32']);
   var className = nf(F.class_get_name, 'pointer', ['pointer']);
-  console.log('[cal] class_get_name -> ' + F.class_get_name + ' eg=' + JSON.stringify(sample.slice(0, 8).map(function (k) { return readStr(className(k)); })));
 
-  // 3) class_get_namespace
+  // figure corlib class count: the int fn whose value matches how far getClass stays non-null
+  var realCount = 0;
+  for (var c = 0; c < 200000; c++) { if (looksPtr(getClass(corlib, c))) realCount = c + 1; else break; }
+  console.log('[cal] corlib class count (probed) = ' + realCount);
+
+  var sample = [];
+  for (var c2 = 0; c2 < realCount && sample.length < 200; c2++) { var k = getClass(corlib, c2); if (looksPtr(k)) sample.push(k); }
+  console.log('[cal] sample eg=' + JSON.stringify(sample.slice(0, 8).map(function (k) { return readStr(className(k)); })));
+
+  // namespace
   F.class_get_namespace = searchFn(50, function (i) {
     var f = nf(i, 'pointer', ['pointer']), ns = {}, ok2 = 0, n = Math.min(sample.length, 60);
     for (var x = 0; x < n; x++) { var s = readStr(f(sample[x])); if (s === null) return false; if (s === '' || isIdent(s)) ok2++; ns[s] = 1; }
-    return ok2 === n && (ns['System'] === 1 || ns[''] === 1) && Object.keys(ns).length >= 3;
+    return ok2 === n && Object.keys(ns).length >= 3;
   });
-
-  // 4) class_get_image + image_get_name (image name reads like "*.dll"/"*.exe")
+  // class_get_image + image_get_name
   F.class_get_image = searchFn(68, function (i) {
-    var f = nf(i, 'pointer', ['pointer']), imgs = {}, n = Math.min(sample.length, 60), okc = 0;
-    for (var x = 0; x < n; x++) { var im = f(sample[x]); if (!looksPtr(im)) return false; imgs[im.toString()] = 1; okc++; }
-    return okc === n && Object.keys(imgs).length <= 20;   // classes map to a few images
+    var f = nf(i, 'pointer', ['pointer']), imgs = {}, n = Math.min(sample.length, 60);
+    for (var x = 0; x < n; x++) { var im = f(sample[x]); if (!looksPtr(im)) return false; imgs[im.toString()] = 1; }
+    return Object.keys(imgs).length <= 25;
   });
-  if (have('class_get_image')) {
-    var cgi = nf(F.class_get_image, 'pointer', ['pointer']);
-    var anImg = cgi(sample[0]);
-    F.image_get_name = searchFn(208, function (i) { var s = readStr(nf(i, 'pointer', ['pointer'])(anImg)); return s && /\.(dll|exe)$/i.test(s); });
-  }
-  console.log('[cal] class_get_namespace -> ' + F.class_get_namespace + ' class_get_image -> ' + F.class_get_image + ' image_get_name -> ' + F.image_get_name);
+  if (have('class_get_image')) { var cgi = nf(F.class_get_image, 'pointer', ['pointer']); var anImg = cgi(sample[0]); F.image_get_name = searchFn(208, function (i) { var s = readStr(nf(i, 'pointer', ['pointer'])(anImg)); return s && /\.(dll|exe)$/i.test(s); }); }
+  console.log('[cal] namespace=' + F.class_get_namespace + ' class_get_image=' + F.class_get_image + ' image_get_name=' + F.image_get_name);
 
-  // 5) fields
+  // fields
   F.class_get_fields = searchFn(40, function (i) {
     var gf = nf(i, 'pointer', ['pointer', 'pointer']);
-    for (var x = 0; x < sample.length; x++) {
-      var it = Memory.alloc(PS); it.writePointer(NULL);
-      var fld = gf(sample[x], it); if (!looksPtr(fld)) continue;
-      var ni = searchFn(87, function (nj) { return isIdent(readStr(nf(nj, 'pointer', ['pointer'])(fld))); });
-      if (ni >= 0) { F.field_get_name = ni; return true; }
-    }
+    for (var x = 0; x < sample.length; x++) { var it = Memory.alloc(PS); it.writePointer(NULL); var fld = gf(sample[x], it); if (!looksPtr(fld)) continue; var ni = searchFn(87, function (nj) { return isIdent(readStr(nf(nj, 'pointer', ['pointer'])(fld))); }); if (ni >= 0) { F.field_get_name = ni; return true; } }
     return false;
   });
   var someField = null;
   if (have('class_get_fields')) { var gfF = nf(F.class_get_fields, 'pointer', ['pointer', 'pointer']); for (var x = 0; x < sample.length && !someField; x++) { var it = Memory.alloc(PS); it.writePointer(NULL); var fl = gfF(sample[x], it); if (looksPtr(fl)) someField = fl; } }
-  if (someField) {
-    F.field_get_type = searchFn(91, function (i) {
-      var ty = nf(i, 'pointer', ['pointer'])(someField); if (!looksPtr(ty)) return false;
-      var ni = searchFn(199, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(ty)); return isIdent(s) && s.indexOf(' ') < 0; });
-      if (ni >= 0) { F.type_get_name = ni; return true; } return false;
-    });
-  }
-  console.log('[cal] class_get_fields -> ' + F.class_get_fields + ' field_get_name -> ' + F.field_get_name + ' field_get_type -> ' + F.field_get_type + ' type_get_name -> ' + F.type_get_name);
+  if (someField) { F.field_get_type = searchFn(91, function (i) { var ty = nf(i, 'pointer', ['pointer'])(someField); if (!looksPtr(ty)) return false; var ni = searchFn(199, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(ty)); return isIdent(s) && s.indexOf(' ') < 0; }); if (ni >= 0) { F.type_get_name = ni; return true; } return false; }); }
+  console.log('[cal] fields gf=' + F.class_get_fields + ' fname=' + F.field_get_name + ' ftype=' + F.field_get_type + ' tyname=' + F.type_get_name);
 
-  // 6) methods
+  // methods
   F.class_get_methods = searchFn(46, function (i) {
     var gm = nf(i, 'pointer', ['pointer', 'pointer']);
-    for (var x = 0; x < sample.length; x++) {
-      var it = Memory.alloc(PS); it.writePointer(NULL);
-      var m = gm(sample[x], it); if (!looksPtr(m)) continue;
-      var ni = searchFn(138, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(m)); return isIdent(s) || s === '.ctor' || s === '.cctor'; });
-      if (ni >= 0) { F.method_get_name = ni; return true; }
-    }
+    for (var x = 0; x < sample.length; x++) { var it = Memory.alloc(PS); it.writePointer(NULL); var m = gm(sample[x], it); if (!looksPtr(m)) continue; var ni = searchFn(138, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(m)); return isIdent(s) || s === '.ctor' || s === '.cctor'; }); if (ni >= 0) { F.method_get_name = ni; return true; } }
     return false;
   });
   var someMethod = null;
@@ -173,7 +166,14 @@ function calibrateAndDump() {
     F.method_get_param = searchFn(145, function (i) { var pc = have('method_get_param_count') ? nf(F.method_get_param_count, 'int', ['pointer'])(someMethod) : 0; if (pc <= 0) return false; var ty = nf(i, 'pointer', ['pointer', 'uint32'])(someMethod, 0); return looksPtr(ty) && isIdent(readStr(tn(ty)) || ''); });
     F.method_get_param_name = searchFn(150, function (i) { var pc = have('method_get_param_count') ? nf(F.method_get_param_count, 'int', ['pointer'])(someMethod) : 0; if (pc <= 0) return false; return isIdent(readStr(nf(i, 'pointer', ['pointer', 'uint32'])(someMethod, 0))); });
   }
-  console.log('[cal] class_get_methods -> ' + F.class_get_methods + ' method_get_name -> ' + F.method_get_name + ' ret/pc/param/pname -> ' + F.method_get_return_type + '/' + F.method_get_param_count + '/' + F.method_get_param + '/' + F.method_get_param_name);
+  console.log('[cal] methods gm=' + F.class_get_methods + ' mname=' + F.method_get_name + ' ret/pc/param/pname=' + F.method_get_return_type + '/' + F.method_get_param_count + '/' + F.method_get_param + '/' + F.method_get_param_name);
+
+  // all-assembly enumeration: class_for_each (callback). If absent, dump corlib only.
+  var all = [], cbCount = 0;
+  var cb = new NativeCallback(function (klass, user) { cbCount++; if (looksPtr(klass) && all.length < 400000) all.push(klass); }, 'void', ['pointer', 'pointer']);
+  F.class_for_each = searchFn(27, function (i) { all.length = 0; cbCount = 0; try { nf(i, 'void', ['pointer', 'pointer'])(cb, NULL); } catch (e) { return false; } if (cbCount < 300) return false; var dp = {}; for (var x = 0; x < Math.min(all.length, 60); x++) dp[all[x].toString()] = 1; return Object.keys(dp).length >= 50 && isIdent(readStr(className(all[0]))); });
+  console.log('[cal] class_for_each=' + F.class_for_each + ' total=' + all.length);
+  if (!have('class_for_each') || all.length === 0) { all = sample.slice(); for (var c3 = sample.length; c3 < realCount; c3++) { var k3 = getClass(corlib, c3); if (looksPtr(k3)) all.push(k3); } console.log('[cal] no class_for_each; corlib-only enumeration=' + all.length); }
 
   var need = ['class_get_name', 'class_get_methods', 'method_get_name'];
   for (var q = 0; q < need.length; q++) if (!have(need[q])) { send({ error: 'incomplete: ' + need[q], F: F }); return; }
@@ -196,31 +196,16 @@ function calibrateAndDump() {
   var outPath = '/data/data/com.playgilla.gilla/gilla_dump.cs';
   var file = new File(outPath, 'w');
   file.write('// IL2CPP dump (self-calibrated) base=' + mod.base + '\n// calibrated: ' + JSON.stringify(F) + '\n// classes=' + all.length + '\n');
-
   var nC = 0, nM = 0, lastImg = null;
-  for (var a = 0; a < all.length; a++) {
-    var klass = all[a]; if (!looksPtr(klass)) continue; nC++;
+  for (var a2 = 0; a2 < all.length; a2++) {
+    var klass = all[a2]; if (!looksPtr(klass)) continue; nC++;
     if (clsImg && imgName) { var inm = readStr(imgName(clsImg(klass))); if (inm && inm !== lastImg) { file.write('\n// Image: ' + inm + '\n'); lastImg = inm; } }
     var kn = readStr(className(klass)) || '?';
     var ns = clsNs ? (readStr(clsNs(klass)) || '') : '';
     file.write((ns ? 'namespace ' + ns + ' { ' : '') + 'class ' + kn + ' {\n');
-    if (clsFields && fldName) {
-      var fit = Memory.alloc(PS); fit.writePointer(NULL); var fld;
-      while (looksPtr(fld = clsFields(klass, fit))) {
-        var ftn = (fldType && tyName) ? (readStr(tyName(fldType(fld))) || 'var') : 'var';
-        file.write('    ' + ftn + ' ' + (readStr(fldName(fld)) || '?') + ';\n');
-      }
-    }
+    if (clsFields && fldName) { var fit = Memory.alloc(PS); fit.writePointer(NULL); var fld; while (looksPtr(fld = clsFields(klass, fit))) { var ftn = (fldType && tyName) ? (readStr(tyName(fldType(fld))) || 'var') : 'var'; file.write('    ' + ftn + ' ' + (readStr(fldName(fld)) || '?') + ';\n'); } }
     var mit = Memory.alloc(PS); mit.writePointer(NULL); var m;
-    while (looksPtr(m = clsMethods(klass, mit))) {
-      nM++;
-      var rt = (mRet && tyName) ? (readStr(tyName(mRet(m))) || 'void') : 'void';
-      var pss = '';
-      if (mPc) { var pc = mPc(m), parts = []; for (var p = 0; p < pc; p++) { var ptn = (mParam && tyName) ? (readStr(tyName(mParam(m, p))) || 'var') : 'arg'; var pn = mPName ? (readStr(mPName(m, p)) || ('a' + p)) : ('a' + p); parts.push(ptn + ' ' + pn); } pss = parts.join(', '); }
-      var rva = '';
-      try { var mp = m.readPointer(); if (!mp.isNull()) rva = ' // RVA 0x' + mp.sub(mod.base).toString(16); } catch (e) {}
-      file.write('    ' + rt + ' ' + (readStr(mName(m)) || '?') + '(' + pss + ');' + rva + '\n');
-    }
+    while (looksPtr(m = clsMethods(klass, mit))) { nM++; var rt = (mRet && tyName) ? (readStr(tyName(mRet(m))) || 'void') : 'void'; var pss = ''; if (mPc) { var pc = mPc(m), parts = []; for (var p = 0; p < pc; p++) { var ptn = (mParam && tyName) ? (readStr(tyName(mParam(m, p))) || 'var') : 'arg'; var pn = mPName ? (readStr(mPName(m, p)) || ('a' + p)) : ('a' + p); parts.push(ptn + ' ' + pn); } pss = parts.join(', '); } var rva = ''; try { var mp = m.readPointer(); if (!mp.isNull()) rva = ' // RVA 0x' + mp.sub(mod.base).toString(16); } catch (e) {} file.write('    ' + rt + ' ' + (readStr(mName(m)) || '?') + '(' + pss + ');' + rva + '\n'); }
     file.write('}' + (ns ? ' }' : '') + '\n');
   }
   file.flush(); file.close();
