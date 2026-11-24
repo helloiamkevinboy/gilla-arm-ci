@@ -25,27 +25,35 @@ function have(n) { return F[n] !== undefined && F[n] >= 0; }
 var SCALE = SORTED.length / 234.0;
 function estIdx(r) { return Math.round(r * SCALE); }
 function findFn(refIdx, test) {
-  var est = estIdx(refIdx), order = [];
-  for (var d = 0; d < SORTED.length; d++) {
-    if (est + d < SORTED.length) order.push(est + d);
-    if (d > 0 && est - d >= 0) order.push(est - d);
+  // bounded, distance-ordered, stop-at-first. margin defaults to 20.
+  // clamp to [3,188]: never probe 0/1/2 (init/init_utf16/shutdown).
+  var margin = (arguments.length > 2 && arguments[2] != null) ? arguments[2] : 20;
+  var est = estIdx(refIdx);
+  var lo = Math.max(3, est - margin), hi = Math.min(SORTED.length - 1, est + margin);
+  var order = [];
+  for (var d = 0; d <= margin; d++) {
+    if (est + d <= hi) order.push(est + d);
+    if (d > 0 && est - d >= lo) order.push(est - d);
   }
   for (var k = 0; k < order.length; k++) { var i = order[k]; try { if (test(i)) return i; } catch (e) {} }
   return -1;
 }
 
-// ---- step 1: get_corlib, also our init-readiness probe ----
+// ---- step 1: get_corlib (= our init-readiness gate). gilla index 11 is verified
+// (old map worked); probe only 11,12,13 so we never call init/shutdown/set_* blindly.
 function findCorlib() {
-  var gi = findFn(13, function (i) {
-    var p = nf(i, 'pointer', [])();
-    if (p.isNull()) return false;
-    for (var off = 0; off <= 8; off += 8) {
-      var s = readStr(p.add(off).readPointer());
-      if (s && s.toLowerCase().indexOf('mscorlib') === 0) { corlib = p; return true; }
-    }
-    return false;
-  });
-  if (gi >= 0) { F.get_corlib = gi; return true; }
+  var cands = [11, 12, 13];
+  for (var c = 0; c < cands.length; c++) {
+    var i = cands[c];
+    try {
+      var p = nf(i, 'pointer', [])();
+      if (p.isNull()) continue;
+      for (var off = 0; off <= 8; off += 8) {
+        var s = readStr(p.add(off).readPointer());
+        if (s && s.toLowerCase().indexOf('mscorlib') === 0) { corlib = p; F.get_corlib = i; return true; }
+      }
+    } catch (e) {}
+  }
   return false;
 }
 
