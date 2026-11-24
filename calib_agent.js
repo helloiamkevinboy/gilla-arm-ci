@@ -74,83 +74,66 @@ function searchFn(hintRef, test) {
   return -1;
 }
 function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0 && p.compare(ptr('0x1000000000000')) < 0; } catch (e) { return false; } }
-
-function readStrAt(p) { if (!looksPtr(p)) return null; try { return p.readCString(); } catch (e) { return null; } }
 function inModule(p) { try { return p.compare(mod.base) >= 0 && p.compare(mod.base.add(mod.size)) < 0; } catch (e) { return false; } }
-function rdStr(p) { if (!looksPtr(p)) return null; try { var s = p.readCString(); if (s && s.length > 0 && s.length < 120 && /^[\x20-\x7e]+$/.test(s)) return s; } catch (e) {} return null; }
+function rdStr(p) { if (!looksPtr(p)) return null; try { var s = p.readCString(); if (s && s.length > 0 && s.length < 200 && /^[\x20-\x7e]+$/.test(s)) return s; } catch (e) {} return null; }
 function calibrateAndDump() {
-  console.log('[cal] get_corlib -> ' + F.get_corlib + ' corlib=' + corlib + ' modbase=' + mod.base + ' modsize=0x' + mod.size.toString(16));
-
-  // image_get_class accessor
+  console.log('[cal] corlib=' + corlib + ' modbase=' + mod.base);
   var accGi = -1, accBest = 0;
   for (var i = 3; i < SORTED.length; i++) { if (isDanger(i)) continue; try { var gc = nf(i, 'pointer', ['pointer', 'uint32']), seen = {}, vv = 0; for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (looksPtr(k)) { vv++; seen[k.toString()] = 1; } } if (vv >= 14 && Object.keys(seen).length > accBest) { accBest = Object.keys(seen).length; accGi = i; } } catch (e) {} }
   F.image_get_class = accGi;
   var getClass = nf(accGi, 'pointer', ['pointer', 'uint32']);
-  console.log('[cal] image_get_class=' + accGi + ' distinct=' + accBest);
+  console.log('[cal] image_get_class=' + accGi);
 
+  // ---- walk the Il2CppImage array (stride 0x48; name char* at +0x8, typeCount u32 at +0x18) ----
+  var STRIDE = 0x48;
+  // find array start: walk back from corlib while +8 is a readable name
+  var start = corlib;
+  for (var b = 0; b < 200; b++) { var prev = start.sub(STRIDE); if (rdStr(prev.add(8))) start = prev; else break; }
+  var images = [];
+  for (var f = 0; f < 400; f++) { var img = start.add(f * STRIDE); var nm = rdStr(img.add(8)); if (!nm) break; var tc = img.add(0x18).readU32(); images.push({ img: img, name: nm, tc: tc }); }
+  console.log('[cal] images found=' + images.length + ' : ' + images.map(function (x) { return x.name + '(' + x.tc + ')'; }).slice(0, 30).join(' '));
+
+  // ---- find real methods array in Il2CppClass: methods[0] must be a MethodInfo with an in-module code ptr ----
   var ks = [];
-  for (var c = 0; c < 2000 && ks.length < 80; c++) { var k = getClass(corlib, c); if (looksPtr(k)) ks.push(k); }
-  console.log('[cal] classes sampled=' + ks.length);
-
-  // dump the struct interpretation for a few classes
-  function dumpStruct(tag, obj, maxoff) {
-    var out = [];
-    for (var off = 0; off < maxoff; off += PS) {
-      var line = '0x' + off.toString(16) + ':';
-      var p; try { p = obj.add(off).readPointer(); } catch (e) { out.push(line + 'ERR'); continue; }
-      var u = obj.add(off).readU32();
-      var s = rdStr(p);
-      if (s) line += '"' + s + '"';
-      else if (inModule(p)) line += 'CODE+0x' + p.sub(mod.base).toString(16);
-      else if (looksPtr(p)) { var inner = null; try { inner = p.readPointer(); } catch (e) {} line += 'ptr' + (looksPtr(inner) ? (rdStr(inner) ? '->"' + rdStr(inner) + '"' : '->ptr') : ''); }
-      else line += 'u32=' + u;
-      out.push(line);
-    }
-    console.log('[map] ' + tag + ' ' + out.join(' '));
-  }
-
-  dumpStruct('class[0]', ks[0], 0xb0);
-  dumpStruct('class[20]', ks[20], 0xb0);
-  dumpStruct('class[40]', ks[40], 0xb0);
-
-  // find a methods-array: (countOff u16, arrOff ptr) where arr has `count` MethodInfo* each pointing to a struct w/ a CODE ptr
-  var found = [];
-  for (var coff = 0x80; coff <= 0x140; coff += 2) {
-    for (var aoff = 0x80; aoff <= 0x100; aoff += PS) {
+  for (var c = 0; c < 2000 && ks.length < 40; c++) { var k = getClass(corlib, c); if (looksPtr(k)) ks.push(k); }
+  var bestPair = null;
+  for (var coff = 0x80; coff <= 0x140 && !bestPair; coff += 2) {
+    for (var aoff = 0x78; aoff <= 0x110; aoff += PS) {
       var ok = 0;
-      for (var x = 0; x < Math.min(ks.length, 30); x++) {
+      for (var x = 0; x < ks.length; x++) {
         try {
-          var cnt = ks[x].add(coff).readU16();
-          var arr = ks[x].add(aoff).readPointer();
+          var cnt = ks[x].add(coff).readU16(); var arr = ks[x].add(aoff).readPointer();
           if (cnt > 0 && cnt < 3000 && looksPtr(arr)) {
-            var m0 = arr.readPointer();
-            if (looksPtr(m0)) ok++;
+            var mi = arr.readPointer();
+            if (looksPtr(mi)) { var hasCode = false; for (var o = 0; o <= 0x40; o += PS) { if (inModule(mi.add(o).readPointer())) { hasCode = true; break; } } if (hasCode) ok++; }
           }
         } catch (e) {}
       }
-      if (ok >= 20) found.push('cnt@0x' + coff.toString(16) + '/arr@0x' + aoff.toString(16) + '(ok=' + ok + ')');
+      if (ok >= 25) { bestPair = { coff: coff, aoff: aoff, ok: ok }; break; }
     }
   }
-  console.log('[map] methods-array candidates: ' + found.slice(0, 20).join(' '));
-
-  // for the first class with cnt>0 at a plausible pair, dump a MethodInfo struct
-  // try the first candidate
-  if (found.length) {
-    var m = found[0].match(/cnt@(0x[0-9a-f]+)\/arr@(0x[0-9a-f]+)/);
-    var coff = parseInt(m[1], 16), aoff = parseInt(m[2], 16);
+  console.log('[cal] methods pair = ' + JSON.stringify(bestPair));
+  if (bestPair) {
+    // dump a real MethodInfo from a class with several methods
     for (var x = 0; x < ks.length; x++) {
       try {
-        var cnt = ks[x].add(coff).readU16();
-        var arr = ks[x].add(aoff).readPointer();
-        if (cnt > 0 && cnt < 3000 && looksPtr(arr)) {
+        var cnt = ks[x].add(bestPair.coff).readU16(); var arr = ks[x].add(bestPair.aoff).readPointer();
+        if (cnt >= 2 && cnt < 3000 && looksPtr(arr)) {
           var mi = arr.readPointer();
-          if (looksPtr(mi)) { console.log('[map] class[' + x + '] method_count=' + cnt + ' methods=' + arr + ' mi0=' + mi); dumpStruct('MethodInfo[0]', mi, 0x60); break; }
+          if (!looksPtr(mi)) continue;
+          var out = [];
+          for (var o = 0; o < 0x50; o += PS) { var p = mi.add(o).readPointer(); var u = mi.add(o).readU32(); var s = rdStr(p); out.push('0x' + o.toString(16) + ':' + (s ? '"' + s + '"' : inModule(p) ? 'CODE+0x' + p.sub(mod.base).toString(16) : looksPtr(p) ? 'ptr' : 'u32=' + u)); }
+          console.log('[map] class[' + x + '] mcount=' + cnt + ' MethodInfo[0]: ' + out.join(' '));
+          // dump MethodInfo[1] too
+          var mi1 = arr.add(PS).readPointer(); var out1 = [];
+          for (var o1 = 0; o1 < 0x50; o1 += PS) { var p1 = mi1.add(o1).readPointer(); var s1 = rdStr(p1); out1.push('0x' + o1.toString(16) + ':' + (s1 ? '"' + s1 + '"' : inModule(p1) ? 'CODE+0x' + p1.sub(mod.base).toString(16) : looksPtr(p1) ? 'ptr' : 'u32=' + mi1.add(o1).readU32())); }
+          console.log('[map] MethodInfo[1]: ' + out1.join(' '));
+          break;
         }
       } catch (e) {}
     }
   }
-
-  send({ error: 'structmap complete', image_get_class: accGi });
+  send({ error: 'structmap2 complete', images: images.length, accGi: accGi });
 }
 
 // ---- bootstrap: wait for module + il2cpp init, then calibrate once ----
