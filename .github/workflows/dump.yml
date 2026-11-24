@@ -99,8 +99,8 @@ jobs:
           adb -s localhost:5555 shell "setsid /data/local/tmp/frida-server >/dev/null 2>&1 &" || \
             adb -s localhost:5555 shell "/data/local/tmp/frida-server &" &
           sleep 6
-          echo "=== DUMP: frida-il2cpp-bridge with renamed-export map ==="
-          python3 driver.py localhost:5555 com.playgilla.gilla agent.js 2>&1 | tail -80
+          echo "=== DUMP: self-calibrating il2cpp dumper ==="
+          python3 driver.py localhost:5555 com.playgilla.gilla calib_agent.js 2>&1 | tail -120
 
       - name: Pull artifacts
         if: always()
