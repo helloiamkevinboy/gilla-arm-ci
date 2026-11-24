@@ -74,38 +74,37 @@ function calibrateAndDump() {
   if (!have('image_get_class_count')) { send({ error: 'calib fail: image_get_class_count', F: F }); return; }
   var imgCount = nf(F.image_get_class_count, 'int', ['pointer']);
 
-  // image_get_class is the next DO_API after image_get_class_count; try count+1 first,
-  // then nearby. Validate jointly with class_get_name, picking the name fn that yields
-  // the MOST distinct readable names (rejects constant image/assembly-name fns).
-  function tryImageGetClass(gi) {
+  // Co-identify image_get_class (gi: image,idx->Il2CppClass*) and class_get_name
+  // (nj: klass->char*) by sweeping plausible windows and picking the pair whose
+  // name fn yields the MOST distinct readable names over real classes. All calls
+  // pass corlib / its classes (read-only, safe), faults are caught.
+  var bestGi = -1, bestNj = -1, bestD = 0;
+  for (var gi = 135; gi < SORTED.length; gi++) {
+    if (isDanger(gi)) continue;
     var gc = nf(gi, 'pointer', ['pointer', 'uint32']);
-    var ks = [];
-    for (var z = 0; z < 24; z++) { var k; try { k = gc(corlib, z); } catch (e) { return false; } if (k.isNull()) return false; ks.push(k); }
-    // scan class_get_name candidates, log distinct counts, keep the best
-    var est = estIdx(48), bestNi = -1, bestD = 0;
-    for (var nj = est - 12; nj <= est + 12; nj++) {
-      if (nj < 3 || nj >= SORTED.length || isDanger(nj)) continue;
+    var ks = [], okk = true;
+    for (var z = 0; z < 16; z++) { var k; try { k = gc(corlib, z); } catch (e) { okk = false; break; } if (k == null || k.isNull()) { okk = false; break; } ks.push(k); }
+    if (!okk) continue;
+    // require the class pointers to be distinct (a real index accessor)
+    var distinctPtr = {}; for (var y = 0; y < ks.length; y++) distinctPtr[ks[y].toString()] = 1;
+    if (Object.keys(distinctPtr).length < 8) continue;
+    for (var nj = 18; nj <= 66; nj++) {
+      if (isDanger(nj)) continue;
       try {
         var f = nf(nj, 'pointer', ['pointer']), names = {}, bad = 0;
-        for (var y = 0; y < ks.length; y++) { var s = readStr(f(ks[y])); if (!isIdent(s)) { bad++; continue; } names[s] = 1; }
+        for (var y2 = 0; y2 < ks.length; y2++) { var s = readStr(f(ks[y2])); if (!isIdent(s)) { bad++; continue; } names[s] = 1; }
         var d = Object.keys(names).length;
-        if (d >= 6) console.log('[cal]   namecand gi=' + gi + ' nj=' + nj + ' distinct=' + d + ' bad=' + bad + ' eg=' + JSON.stringify(Object.keys(names).slice(0, 5)));
-        if (bad <= 4 && d > bestD) { bestD = d; bestNi = nj; }
+        if (d >= 8 && bad <= 2) {
+          console.log('[diag] gi=' + gi + ' (' + SORTED[gi] + ') nj=' + nj + ' distinct=' + d + ' eg=' + JSON.stringify(Object.keys(names).slice(0, 4)));
+          if (d > bestD) { bestD = d; bestGi = gi; bestNj = nj; }
+        }
       } catch (e) {}
     }
-    if (bestNi >= 0 && bestD >= 10) { F.class_get_name = bestNi; return true; }
-    return false;
   }
-  var igcCandidates = [F.image_get_class_count + 1, F.image_get_class_count + 2, F.image_get_class_count - 1, estIdx(212)];
-  for (var gci = 0; gci < igcCandidates.length; gci++) {
-    var gi = igcCandidates[gci];
-    if (gi < 3 || gi >= SORTED.length || isDanger(gi)) continue;
-    if (tryImageGetClass(gi)) { F.image_get_class = gi; break; }
-  }
-  if (!have('image_get_class')) F.image_get_class = -1;
+  console.log('[cal] best image_get_class=' + bestGi + ' class_get_name=' + bestNj + ' distinct=' + bestD);
+  if (bestGi < 0 || bestNj < 0) { send({ error: 'calib fail: no image_get_class/class_get_name pair', F: F }); return; }
+  F.image_get_class = bestGi; F.class_get_name = bestNj;
   console.log('[cal] image_get_class -> ' + F.image_get_class + ' class_get_name -> ' + F.class_get_name);
-  if (!have('image_get_class') || !have('class_get_name')) { send({ error: 'calib fail: class enum', F: F }); return; }
-  if (!have('image_get_class') || !have('class_get_name')) { send({ error: 'calib fail: class enum', F: F }); return; }
   var getClass = nf(F.image_get_class, 'pointer', ['pointer', 'uint32']);
   var className = nf(F.class_get_name, 'pointer', ['pointer']);
 
