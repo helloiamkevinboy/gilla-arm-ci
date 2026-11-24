@@ -75,9 +75,15 @@ function calibrateAndDump() {
   var imgCount = nf(F.image_get_class_count, 'int', ['pointer']);
 
   F.image_get_class = findFn(212, function (gi) {
-    var k0 = nf(gi, 'pointer', ['pointer', 'uint32'])(corlib, 0);
-    if (k0.isNull()) return false;
-    var ni = findFn(45, function (nj) { return isIdent(readStr(nf(nj, 'pointer', ['pointer'])(k0))); });
+    var gc = nf(gi, 'pointer', ['pointer', 'uint32']);
+    var ks = [];
+    for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (k.isNull()) return false; ks.push(k); }
+    // class_get_name must give mostly-DISTINCT readable names (reject image/assembly-name fns)
+    var ni = findFn(48, function (nj) {
+      var f = nf(nj, 'pointer', ['pointer']), names = {}, bad = 0;
+      for (var y = 0; y < ks.length; y++) { var s = readStr(f(ks[y])); if (!isIdent(s)) { bad++; continue; } names[s] = 1; }
+      return bad <= 3 && Object.keys(names).length >= 10;
+    });
     if (ni < 0) return false;
     F.class_get_name = ni; return true;
   });
@@ -94,7 +100,7 @@ function calibrateAndDump() {
   }
   console.log('[cal] sample: ' + sample.slice(0, 10).map(function (k) { return readStr(className(k)); }).join(', '));
 
-  F.class_get_namespace = findFn(47, function (i) {
+  F.class_get_namespace = findFn(50, function (i) {
     var f = nf(i, 'pointer', ['pointer']), ok = 0, sys = 0;
     for (var x = 0; x < sample.length; x++) {
       var s = readStr(f(sample[x]));
@@ -106,8 +112,8 @@ function calibrateAndDump() {
   });
   console.log('[cal] class_get_namespace -> ' + F.class_get_namespace);
 
-  F.image_get_name = findFn(206, function (i) { var s = readStr(nf(i, 'pointer', ['pointer'])(corlib)); return s && s.toLowerCase() === 'mscorlib.dll'; });
-  F.class_get_image = findFn(64, function (i) {
+  F.image_get_name = findFn(208, function (i) { var s = readStr(nf(i, 'pointer', ['pointer'])(corlib)); return s && s.toLowerCase() === 'mscorlib.dll'; });
+  F.class_get_image = findFn(68, function (i) {
     var im = nf(i, 'pointer', ['pointer'])(sample[0]);
     if (im.isNull()) return false;
     if (!have('image_get_name')) return imgCount(im) > 0 && imgCount(im) < 500000;
@@ -116,13 +122,13 @@ function calibrateAndDump() {
   console.log('[cal] image_get_name -> ' + F.image_get_name + ' class_get_image -> ' + F.class_get_image);
 
   // fields
-  F.class_get_fields = findFn(38, function (fi) {
+  F.class_get_fields = findFn(40, function (fi) {
     var gf = nf(fi, 'pointer', ['pointer', 'pointer']);
     for (var x = 0; x < sample.length; x++) {
       var it = Memory.alloc(PS); it.writePointer(NULL);
       var fld = gf(sample[x], it);
       if (fld.isNull()) continue;
-      var ni = findFn(85, function (nj) { return isIdent(readStr(nf(nj, 'pointer', ['pointer'])(fld))); });
+      var ni = findFn(87, function (nj) { return isIdent(readStr(nf(nj, 'pointer', ['pointer'])(fld))); });
       if (ni >= 0) { F.field_get_name = ni; return true; }
     }
     return false;
@@ -133,10 +139,10 @@ function calibrateAndDump() {
     for (var x = 0; x < sample.length && !someField; x++) { var it = Memory.alloc(PS); it.writePointer(NULL); var fl = gfF(sample[x], it); if (!fl.isNull()) someField = fl; }
   }
   if (someField) {
-    F.field_get_type = findFn(89, function (ti) {
+    F.field_get_type = findFn(91, function (ti) {
       var ty = nf(ti, 'pointer', ['pointer'])(someField);
       if (ty.isNull()) return false;
-      var ni = findFn(201, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(ty)); return isIdent(s) && s.indexOf(' ') < 0; });
+      var ni = findFn(199, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(ty)); return isIdent(s) && s.indexOf(' ') < 0; });
       if (ni >= 0) { F.type_get_name = ni; return true; }
       return false;
     });
@@ -144,13 +150,13 @@ function calibrateAndDump() {
   console.log('[cal] class_get_fields -> ' + F.class_get_fields + ' field_get_name -> ' + F.field_get_name + ' field_get_type -> ' + F.field_get_type + ' type_get_name -> ' + F.type_get_name);
 
   // methods
-  F.class_get_methods = findFn(42, function (mi) {
+  F.class_get_methods = findFn(46, function (mi) {
     var gm = nf(mi, 'pointer', ['pointer', 'pointer']);
     for (var x = 0; x < sample.length; x++) {
       var it = Memory.alloc(PS); it.writePointer(NULL);
       var m = gm(sample[x], it);
       if (m.isNull()) continue;
-      var ni = findFn(129, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(m)); return isIdent(s) || s === '.ctor' || s === '.cctor'; });
+      var ni = findFn(138, function (nj) { var s = readStr(nf(nj, 'pointer', ['pointer'])(m)); return isIdent(s) || s === '.ctor' || s === '.cctor'; });
       if (ni >= 0) { F.method_get_name = ni; return true; }
     }
     return false;
@@ -162,15 +168,15 @@ function calibrateAndDump() {
   }
   if (someMethod && have('type_get_name')) {
     var tn = nf(F.type_get_name, 'pointer', ['pointer']);
-    F.method_get_return_type = findFn(126, function (i) { var ty = nf(i, 'pointer', ['pointer'])(someMethod); return !ty.isNull() && isIdent(readStr(tn(ty)) || ''); });
-    F.method_get_param_count = findFn(135, function (i) { var n = nf(i, 'int', ['pointer'])(someMethod); return n >= 0 && n < 100; });
-    F.method_get_param = findFn(136, function (i) {
+    F.method_get_return_type = findFn(136, function (i) { var ty = nf(i, 'pointer', ['pointer'])(someMethod); return !ty.isNull() && isIdent(readStr(tn(ty)) || ''); });
+    F.method_get_param_count = findFn(144, function (i) { var n = nf(i, 'int', ['pointer'])(someMethod); return n >= 0 && n < 100; });
+    F.method_get_param = findFn(145, function (i) {
       var pc = have('method_get_param_count') ? nf(F.method_get_param_count, 'int', ['pointer'])(someMethod) : 0;
       if (pc <= 0) return false;
       var ty = nf(i, 'pointer', ['pointer', 'uint32'])(someMethod, 0);
       return !ty.isNull() && isIdent(readStr(tn(ty)) || '');
     });
-    F.method_get_param_name = findFn(138, function (i) {
+    F.method_get_param_name = findFn(150, function (i) {
       var pc = have('method_get_param_count') ? nf(F.method_get_param_count, 'int', ['pointer'])(someMethod) : 0;
       if (pc <= 0) return false;
       return isIdent(readStr(nf(i, 'pointer', ['pointer', 'uint32'])(someMethod, 0)));
@@ -217,7 +223,7 @@ function calibrateAndDump() {
   var mParam = have('method_get_param') ? nf(F.method_get_param, 'pointer', ['pointer', 'uint32']) : null;
   var mPName = have('method_get_param_name') ? nf(F.method_get_param_name, 'pointer', ['pointer', 'uint32']) : null;
 
-  var outPath = '/data/local/tmp/gilla_dump.cs';
+  var outPath = '/data/data/com.playgilla.gilla/gilla_dump.cs';
   var file = new File(outPath, 'w');
   file.write('// IL2CPP dump (self-calibrated) base=' + mod.base + '\n// calibrated: ' + JSON.stringify(F) + '\n// classes=' + all.length + '\n');
 
