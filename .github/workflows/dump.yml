@@ -99,8 +99,8 @@ jobs:
           adb -s localhost:5555 shell "setsid /data/local/tmp/frida-server >/dev/null 2>&1 &" || \
             adb -s localhost:5555 shell "/data/local/tmp/frida-server &" &
           sleep 6
-          echo "=== RECON: inspect live process (exports + decrypted metadata) ==="
-          python3 diag_driver.py localhost:5555 com.playgilla.gilla diag.js 2>&1 | tail -50
+          echo "=== DUMP: frida-il2cpp-bridge with renamed-export map ==="
+          python3 driver.py localhost:5555 com.playgilla.gilla agent.js 2>&1 | tail -80
 
       - name: Pull artifacts
         if: always()
