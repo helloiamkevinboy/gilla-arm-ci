@@ -1,71 +1,63 @@
 'use strict';
-// Custom RE recon: on NATIVE arm64 (redroid), inspect the running game to find
-// (a) what libil2cpp exports actually exist, (b) whether the DECRYPTED metadata
-// sits in memory in standard format (magic AF1BB1FA), and dump it if so.
+// Recon round 2: dump the full export table (to reverse the il2cpp name-scramble)
+// and the mapped metadata region (to check whether it's decrypted in place).
 
-function scan(pat) {
-  var n = 0, hits = [];
+function scanHits(pat) {
+  var hits = [];
   var rs = Process.enumerateRanges('r--');
   for (var i = 0; i < rs.length; i++) {
     try {
       var h = Memory.scanSync(rs[i].base, rs[i].size, pat);
-      for (var j = 0; j < h.length; j++) { n++; if (hits.length < 6) hits.push(h[j].address); }
+      for (var j = 0; j < h.length && hits.length < 10; j++) hits.push(h[j].address);
     } catch (e) {}
   }
-  return { n: n, hits: hits };
-}
-
-function metaLen(base) {
-  var version = base.add(4).readInt();
-  var max = 0;
-  for (var i = 0; i < 66; i++) {
-    var off = base.add(8 + i * 8).readU32();
-    var sz = base.add(8 + i * 8 + 4).readU32();
-    if (off > 0 && off < 0x8000000 && sz > 0 && sz < 0x8000000 && off + sz > max) max = off + sz;
-  }
-  return { version: version, length: max };
+  return hits;
 }
 
 function run() {
   var mod = Process.findModuleByName('libil2cpp.so');
-  if (!mod) { console.log('[diag] libil2cpp.so not loaded yet'); return false; }
+  if (!mod) { console.log('[diag] libil2cpp not loaded'); return false; }
   console.log('[diag] libil2cpp base=' + mod.base + ' size=0x' + mod.size.toString(16));
 
-  // --- exports: what IS exported? ---
+  // 1) full export table: name + offset-from-base
   var exps = mod.enumerateExports();
-  console.log('[diag] total exports=' + exps.length);
-  var ilish = exps.filter(function (e) { return /il2cpp|metadata|mono|corlib|domain/i.test(e.name); });
-  console.log('[diag] il2cpp-ish exports(' + ilish.length + ')=' + JSON.stringify(ilish.slice(0, 30).map(function (e) { return e.name; })));
-  console.log('[diag] first 30 export names=' + JSON.stringify(exps.slice(0, 30).map(function (e) { return e.name; })));
-
-  // --- scan for decrypted (AF1BB1FA) and encrypted (9EFE10A6) metadata ---
-  var dec = scan('af 1b b1 fa');
-  console.log('[diag] decrypted-magic AF1BB1FA count=' + dec.n + ' hits=' + JSON.stringify(dec.hits.map(String)));
-  var enc = scan('9e fe 10 a6');
-  console.log('[diag] encrypted-magic 9EFE10A6 count=' + enc.n + ' hits=' + JSON.stringify(enc.hits.map(String)));
-
-  // --- dump any valid decrypted metadata buffer ---
-  var dumped = false;
-  for (var i = 0; i < dec.hits.length && !dumped; i++) {
-    try {
-      var info = metaLen(dec.hits[i]);
-      console.log('[diag] candidate @' + dec.hits[i] + ' version=' + info.version + ' size=' + info.length);
-      if (info.version >= 24 && info.version <= 40 && info.length > 0x100000 && info.length < 0x4000000) {
-        var f = new File('/data/local/tmp/meta_decrypted.dat', 'wb');
-        f.write(dec.hits[i].readByteArray(info.length)); f.close();
-        console.log('[diag] *** DUMPED metadata v' + info.version + ' ' + info.length + ' bytes -> /data/local/tmp/meta_decrypted.dat');
-        dumped = true;
-      }
-    } catch (e) { console.log('[diag] parse err ' + e); }
+  var lines = ['base=' + mod.base];
+  for (var i = 0; i < exps.length; i++) {
+    lines.push(exps[i].name + '\t' + exps[i].address.sub(mod.base) + '\t' + exps[i].type);
   }
+  var fe = new File('/data/local/tmp/exports.txt', 'w');
+  fe.write(lines.join('\n')); fe.close();
+  console.log('[diag] dumped ' + exps.length + ' exports -> exports.txt');
 
-  // --- locate a known metadata identifier string ---
-  var needle = Array.prototype.map.call('GillaStashSave', function (c) {
-    return ('0' + c.charCodeAt(0).toString(16)).slice(-2);
-  }).join(' ');
-  var s = scan(needle);
-  console.log('[diag] "GillaStashSave" count=' + s.n + ' first=' + (s.hits[0] || 'none'));
-  send({ done: true, dumped: dumped, exports: exps.length, decCount: dec.n });
+  // 2) metadata region (the mmap containing the 9EFE10A6 magic)
+  var hits = scanHits('9e fe 10 a6');
+  console.log('[diag] 9EFE10A6 hits=' + JSON.stringify(hits.map(String)));
+  if (hits.length) {
+    var a = hits[0];
+    var rs = Process.enumerateRanges('r--');
+    for (var i = 0; i < rs.length; i++) {
+      var end = rs[i].base.add(rs[i].size);
+      if (a.compare(rs[i].base) >= 0 && a.compare(end) < 0) {
+        console.log('[diag] metadata region base=' + rs[i].base + ' size=0x' + rs[i].size.toString(16) +
+                    ' magicOffset=' + a.sub(rs[i].base));
+        // sample entropy at magic+0 (header), magic+0x1000, and deep in first half
+        [0, 0x1000, 0x100000, 0x400000].forEach(function (off) {
+          try {
+            var b = new Uint8Array(a.add(off).readByteArray(2048));
+            var pr = 0, zero = 0;
+            for (var k = 0; k < b.length; k++) { if (b[k] >= 32 && b[k] < 127) pr++; if (b[k] === 0) zero++; }
+            console.log('[diag]  off+0x' + off.toString(16) + ': printable%=' + Math.floor(pr * 100 / 2048) +
+                        ' zero%=' + Math.floor(zero * 100 / 2048));
+          } catch (e) {}
+        });
+        var fr = new File('/data/local/tmp/meta_region.dat', 'wb');
+        fr.write(rs[i].base.readByteArray(rs[i].size)); fr.close();
+        console.log('[diag] dumped metadata region (' + rs[i].size + ' bytes) -> meta_region.dat');
+        break;
+      }
+    }
+  }
+  send({ done: true, exports: exps.length });
   return true;
 }
 
