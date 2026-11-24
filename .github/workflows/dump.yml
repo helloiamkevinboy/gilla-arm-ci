@@ -96,28 +96,26 @@ jobs:
           adb -s localhost:5555 connect localhost:5555 || true
           adb -s localhost:5555 push fs /data/local/tmp/frida-server
           adb -s localhost:5555 shell chmod 755 /data/local/tmp/frida-server
-          adb -s localhost:5555 shell "/data/local/tmp/frida-server &" &
-          sleep 5
-          echo "=== frida-ps ==="
-          frida-ps -H localhost:5555 2>&1 | head -5 || true
-          echo "=== running dumper ==="
-          python3 driver.py localhost:5555 com.playgilla.gilla agent.js 2>&1 | tail -40
+          adb -s localhost:5555 shell "setsid /data/local/tmp/frida-server >/dev/null 2>&1 &" || \
+            adb -s localhost:5555 shell "/data/local/tmp/frida-server &" &
+          sleep 6
+          echo "=== RECON: inspect live process (exports + decrypted metadata) ==="
+          python3 diag_driver.py localhost:5555 com.playgilla.gilla diag.js 2>&1 | tail -50
 
-      - name: Pull dump
+      - name: Pull artifacts
         if: always()
         run: |
-          adb -s localhost:5555 shell "cat /data/data/com.playgilla.gilla/files/gilla_dump.cs 2>/dev/null; cat /data/local/tmp/gilla_dump.cs 2>/dev/null" > /dev/null 2>&1 || true
-          for p in /data/local/tmp/gilla_dump.cs /data/data/com.playgilla.gilla/files/gilla_dump.cs /sdcard/Android/data/com.playgilla.gilla/files/gilla_dump.cs; do
-            adb -s localhost:5555 pull "$p" gilla_dump.cs 2>/dev/null && echo "pulled from $p" && break
-          done
-          ls -la gilla_dump.cs 2>/dev/null && head -40 gilla_dump.cs || echo "no dump file produced"
-          echo "--- redroid logs tail ---"; docker logs redroid 2>&1 | tail -20 || true
+          adb -s localhost:5555 pull /data/local/tmp/meta_decrypted.dat meta_decrypted.dat 2>/dev/null && echo "got decrypted metadata!" || echo "no metadata dumped"
+          adb -s localhost:5555 pull /data/local/tmp/gilla_dump.cs gilla_dump.cs 2>/dev/null || true
+          ls -la meta_decrypted.dat gilla_dump.cs 2>/dev/null || true
+          echo "--- redroid logs tail ---"; docker logs redroid 2>&1 | tail -15 || true
 
-      - name: Upload dump
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gilla-dump
           path: |
+            meta_decrypted.dat
             gilla_dump.cs
           if-no-files-found: warn
