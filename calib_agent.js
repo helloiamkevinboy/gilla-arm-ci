@@ -73,12 +73,9 @@ function searchFn(hintRef, test) {
   for (var k = 0; k < order.length; k++) { var i = order[k]; if (i < 3 || isDanger(i)) continue; try { if (test(i)) return i; } catch (e) {} }
   return -1;
 }
-function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
+function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0 && p.compare(ptr('0x1000000000000')) < 0; } catch (e) { return false; } }
 
-function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
 function readStrAt(p) { if (!looksPtr(p)) return null; try { return p.readCString(); } catch (e) { return null; } }
-function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
-function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0 && p.compare(ptr('0x8000000000')) < 0; } catch (e) { return false; } }
 function inModule(p) { try { return p.compare(mod.base) >= 0 && p.compare(mod.base.add(mod.size)) < 0; } catch (e) { return false; } }
 function rdStr(p) { if (!looksPtr(p)) return null; try { var s = p.readCString(); if (s && s.length > 0 && s.length < 120 && /^[\x20-\x7e]+$/.test(s)) return s; } catch (e) {} return null; }
 function calibrateAndDump() {
