@@ -74,20 +74,37 @@ function calibrateAndDump() {
   if (!have('image_get_class_count')) { send({ error: 'calib fail: image_get_class_count', F: F }); return; }
   var imgCount = nf(F.image_get_class_count, 'int', ['pointer']);
 
-  F.image_get_class = findFn(212, function (gi) {
+  // image_get_class is the next DO_API after image_get_class_count; try count+1 first,
+  // then nearby. Validate jointly with class_get_name, picking the name fn that yields
+  // the MOST distinct readable names (rejects constant image/assembly-name fns).
+  function tryImageGetClass(gi) {
     var gc = nf(gi, 'pointer', ['pointer', 'uint32']);
     var ks = [];
-    for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (k.isNull()) return false; ks.push(k); }
-    // class_get_name must give mostly-DISTINCT readable names (reject image/assembly-name fns)
-    var ni = findFn(48, function (nj) {
-      var f = nf(nj, 'pointer', ['pointer']), names = {}, bad = 0;
-      for (var y = 0; y < ks.length; y++) { var s = readStr(f(ks[y])); if (!isIdent(s)) { bad++; continue; } names[s] = 1; }
-      return bad <= 3 && Object.keys(names).length >= 10;
-    });
-    if (ni < 0) return false;
-    F.class_get_name = ni; return true;
-  });
+    for (var z = 0; z < 24; z++) { var k; try { k = gc(corlib, z); } catch (e) { return false; } if (k.isNull()) return false; ks.push(k); }
+    // scan class_get_name candidates, log distinct counts, keep the best
+    var est = estIdx(48), bestNi = -1, bestD = 0;
+    for (var nj = est - 12; nj <= est + 12; nj++) {
+      if (nj < 3 || nj >= SORTED.length || isDanger(nj)) continue;
+      try {
+        var f = nf(nj, 'pointer', ['pointer']), names = {}, bad = 0;
+        for (var y = 0; y < ks.length; y++) { var s = readStr(f(ks[y])); if (!isIdent(s)) { bad++; continue; } names[s] = 1; }
+        var d = Object.keys(names).length;
+        if (d >= 6) console.log('[cal]   namecand gi=' + gi + ' nj=' + nj + ' distinct=' + d + ' bad=' + bad + ' eg=' + JSON.stringify(Object.keys(names).slice(0, 5)));
+        if (bad <= 4 && d > bestD) { bestD = d; bestNi = nj; }
+      } catch (e) {}
+    }
+    if (bestNi >= 0 && bestD >= 10) { F.class_get_name = bestNi; return true; }
+    return false;
+  }
+  var igcCandidates = [F.image_get_class_count + 1, F.image_get_class_count + 2, F.image_get_class_count - 1, estIdx(212)];
+  for (var gci = 0; gci < igcCandidates.length; gci++) {
+    var gi = igcCandidates[gci];
+    if (gi < 3 || gi >= SORTED.length || isDanger(gi)) continue;
+    if (tryImageGetClass(gi)) { F.image_get_class = gi; break; }
+  }
+  if (!have('image_get_class')) F.image_get_class = -1;
   console.log('[cal] image_get_class -> ' + F.image_get_class + ' class_get_name -> ' + F.class_get_name);
+  if (!have('image_get_class') || !have('class_get_name')) { send({ error: 'calib fail: class enum', F: F }); return; }
   if (!have('image_get_class') || !have('class_get_name')) { send({ error: 'calib fail: class enum', F: F }); return; }
   var getClass = nf(F.image_get_class, 'pointer', ['pointer', 'uint32']);
   var className = nf(F.class_get_name, 'pointer', ['pointer']);
