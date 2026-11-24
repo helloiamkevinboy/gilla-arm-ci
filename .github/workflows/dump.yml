@@ -105,8 +105,8 @@ jobs:
       - name: Pull artifacts
         if: always()
         run: |
-          adb -s localhost:5555 pull /data/local/tmp/exports.txt exports.txt 2>/dev/null && echo "got exports" || echo "no exports"
-          adb -s localhost:5555 pull /data/local/tmp/meta_region.dat meta_region.dat 2>/dev/null && echo "got meta_region" || echo "no meta_region"
+          adb -s localhost:5555 pull /data/data/com.playgilla.gilla/exports.txt exports.txt 2>/dev/null && echo "got exports" || echo "no exports"
+          adb -s localhost:5555 pull /data/data/com.playgilla.gilla/meta_region.dat meta_region.dat 2>/dev/null && echo "got meta_region" || echo "no meta_region"
           adb -s localhost:5555 pull /data/local/tmp/gilla_dump.cs gilla_dump.cs 2>/dev/null || true
           ls -la exports.txt meta_region.dat gilla_dump.cs 2>/dev/null || true
           echo "--- redroid logs tail ---"; docker logs redroid 2>&1 | tail -15 || true

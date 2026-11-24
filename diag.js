@@ -25,7 +25,7 @@ function run() {
   for (var i = 0; i < exps.length; i++) {
     lines.push(exps[i].name + '\t' + exps[i].address.sub(mod.base) + '\t' + exps[i].type);
   }
-  var fe = new File('/data/local/tmp/exports.txt', 'w');
+  var fe = new File('/data/data/com.playgilla.gilla/exports.txt', 'w');
   fe.write(lines.join('\n')); fe.close();
   console.log('[diag] dumped ' + exps.length + ' exports -> exports.txt');
 
@@ -50,7 +50,7 @@ function run() {
                         ' zero%=' + Math.floor(zero * 100 / 2048));
           } catch (e) {}
         });
-        var fr = new File('/data/local/tmp/meta_region.dat', 'wb');
+        var fr = new File('/data/data/com.playgilla.gilla/meta_region.dat', 'wb');
         fr.write(rs[i].base.readByteArray(rs[i].size)); fr.close();
         console.log('[diag] dumped metadata region (' + rs[i].size + ' bytes) -> meta_region.dat');
         break;
