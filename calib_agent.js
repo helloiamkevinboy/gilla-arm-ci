@@ -74,6 +74,23 @@ function calibrateAndDump() {
   if (!have('image_get_class_count')) { send({ error: 'calib fail: image_get_class_count', F: F }); return; }
   var imgCount = nf(F.image_get_class_count, 'int', ['pointer']);
 
+  // RAW DIAGNOSTIC: see what indices actually return when fed corlib, so we stop guessing.
+  var intHits = [], ptrHits = [];
+  for (var di = 3; di < SORTED.length; di++) {
+    if (isDanger(di)) continue;
+    try { var iv = nf(di, 'int', ['pointer'])(corlib); if (iv > 20 && iv < 2000000) intHits.push(di + ':' + iv); } catch (e) {}
+    try {
+      var p0 = nf(di, 'pointer', ['pointer', 'uint32'])(corlib, 0);
+      var p1 = nf(di, 'pointer', ['pointer', 'uint32'])(corlib, 1);
+      if (!p0.isNull() && !p1.isNull() && !p0.equals(p1)) {
+        // does p0 look like an Il2CppClass? (has a readable field somewhere) — just record
+        ptrHits.push(di + ':' + p0 + '/' + p1);
+      }
+    } catch (e) {}
+  }
+  console.log('[diag] int-returning(corlib) in [20,2e6]: ' + intHits.join(' '));
+  console.log('[diag] accessor(corlib,0)!=(corlib,1) nonnull: ' + ptrHits.slice(0, 40).join(' '));
+
   // Co-identify image_get_class (gi: image,idx->Il2CppClass*) and class_get_name
   // (nj: klass->char*) by sweeping plausible windows and picking the pair whose
   // name fn yields the MOST distinct readable names over real classes. All calls
