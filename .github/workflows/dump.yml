@@ -69,8 +69,17 @@ jobs:
 
       - name: Install game
         run: |
-          echo "downloading apk..."
-          curl -fL "${{ github.event.inputs.apk_url }}" -o game.apk
+          URL="${{ github.event.inputs.apk_url }}"
+          echo "apk source: $URL"
+          if echo "$URL" | grep -q "drive.google.com"; then
+            python3 -m pip install --quiet gdown
+            ID=$(echo "$URL" | grep -oE '/d/[^/]+' | cut -d/ -f3)
+            [ -z "$ID" ] && ID=$(echo "$URL" | grep -oE 'id=[^&]+' | cut -d= -f2)
+            echo "google drive id: $ID"
+            gdown "$ID" -O game.apk
+          else
+            curl -fL "$URL" -o game.apk
+          fi
           ls -la game.apk
           file game.apk
           adb -s localhost:5555 install -r -g game.apk
