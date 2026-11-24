@@ -77,63 +77,45 @@ function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0
 
 function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
 function readStrAt(p) { if (!looksPtr(p)) return null; try { return p.readCString(); } catch (e) { return null; } }
+function looksPtr(p) { try { return p != null && !p.isNull() && p.compare(ptr('0x100000')) > 0; } catch (e) { return false; } }
 function calibrateAndDump() {
   console.log('[cal] get_corlib -> ' + F.get_corlib + ' corlib=' + corlib);
 
-  // detect image_get_class accessor: most distinct valid class ptrs over (corlib,0..23)
-  var accGi = -1, accBest = 0, accKs = null;
+  // image_get_class = accessor with most distinct class ptrs
+  var accGi = -1, accBest = 0;
   for (var i = 3; i < SORTED.length; i++) {
     if (isDanger(i)) continue;
-    try {
-      var gc = nf(i, 'pointer', ['pointer', 'uint32']), v = [], seen = {};
-      for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (looksPtr(k)) { v.push(k); seen[k.toString()] = 1; } }
-      var dd = Object.keys(seen).length;
-      if (v.length >= 14 && dd > accBest) { accBest = dd; accGi = i; accKs = v; }
-    } catch (e) {}
+    try { var gc = nf(i, 'pointer', ['pointer', 'uint32']), seen = {}, vv = 0; for (var z = 0; z < 24; z++) { var k = gc(corlib, z); if (looksPtr(k)) { vv++; seen[k.toString()] = 1; } } if (vv >= 14 && Object.keys(seen).length > accBest) { accBest = Object.keys(seen).length; accGi = i; } } catch (e) {}
   }
-  console.log('[cal] image_get_class=' + accGi + ' distinct=' + accBest);
-  if (accGi < 0) { send({ error: 'no accessor' }); return; }
   F.image_get_class = accGi;
   var getClass = nf(accGi, 'pointer', ['pointer', 'uint32']);
+  console.log('[cal] image_get_class=' + accGi + ' distinct=' + accBest);
 
-  // gather ~12 corlib classes
   var ks = [];
-  for (var c = 0; c < 400 && ks.length < 12; c++) { var k = getClass(corlib, c); if (looksPtr(k)) ks.push(k); }
-  console.log('[cal] got ' + ks.length + ' class ptrs; k0=' + ks[0]);
+  for (var c = 0; c < 400 && ks.length < 16; c++) { var kk = getClass(corlib, c); if (looksPtr(kk)) ks.push(kk); }
 
-  // STRUCT SCAN: for each 8-byte offset, classify across the 12 classes.
-  // string offset = ptr to readable C-ident at same offset for all; int offset = small int.
-  var MAXOFF = 0x200;
-  var strOffs = [], intOffs = [];
-  for (var off = 0; off < MAXOFF; off += PS) {
-    var allStr = true, names = {}, strBad = 0;
-    var allInt = true, ints = {};
-    for (var x = 0; x < ks.length; x++) {
-      var raw;
-      try { raw = ks[x].add(off).readPointer(); } catch (e) { allStr = false; allInt = false; break; }
-      var s = readStrAt(raw);
-      if (s !== null && /^[A-Za-z_<][\w.`<>]*$/.test(s) && s.length < 80) { names[s] = 1; } else { strBad++; }
-      // int view
-      var iv;
-      try { iv = ks[x].add(off).readU32(); } catch (e) { iv = -1; }
-      if (iv >= 0 && iv < 65536) ints[iv] = 1; else allInt = false;
-    }
-    if (strBad <= 2 && Object.keys(names).length >= 6) strOffs.push('0x' + off.toString(16) + '(' + Object.keys(names).length + ')=' + JSON.stringify(Object.keys(names).slice(0, 3)));
-    if (allInt && Object.keys(ints).length >= 4) intOffs.push('0x' + off.toString(16) + '=' + JSON.stringify(Object.keys(ints).slice(0, 6)));
+  // FULL-RANGE class_get_name search: NO order-based danger filter (order is shuffled).
+  // Call (klass)->char*; the real one returns many distinct readable names.
+  // Progress log every 15 indices so a blocking export reveals itself on timeout.
+  var known = {}; known[F.get_corlib] = 1; known[accGi] = 1;
+  var nameIdx = -1, nameBest = 0;
+  for (var i2 = 3; i2 < SORTED.length; i2++) {
+    if (i2 % 15 === 0) console.log('[cal] name-probe at ' + i2);
+    if (known[i2]) continue;
+    try {
+      var f = nf(i2, 'pointer', ['pointer']), names = {}, bad = 0;
+      for (var y = 0; y < ks.length; y++) { var s = readStr(f(ks[y])); if (isIdent(s)) names[s] = 1; else bad++; }
+      var d = Object.keys(names).length;
+      if (d >= 10 && bad <= 3) { console.log('[cal] NAME candidate i=' + i2 + ' distinct=' + d + ' eg=' + JSON.stringify(Object.keys(names).slice(0, 5))); if (d > nameBest) { nameBest = d; nameIdx = i2; } }
+    } catch (e) {}
   }
-  console.log('[cal] STRING offsets (name/namespace candidates):');
-  for (var a = 0; a < strOffs.length; a++) console.log('[diag]   str ' + strOffs[a]);
-  console.log('[cal] INT offsets (count candidates):');
-  for (var b = 0; b < intOffs.length; b++) console.log('[diag]   int ' + intOffs[b]);
+  console.log('[cal] class_get_name=' + nameIdx + ' distinct=' + nameBest);
+  if (nameIdx < 0) { send({ error: 'class_get_name not found in full scan', F: F, accGi: accGi }); return; }
+  F.class_get_name = nameIdx;
+  var className = nf(nameIdx, 'pointer', ['pointer']);
+  console.log('[cal] sample names: ' + ks.slice(0, 10).map(function (k) { return readStr(className(k)); }).join(', '));
 
-  // also: for k0 dump pointer-valued offsets that point into mapped mem (fields/methods arrays)
-  var ptrOffs = [];
-  for (var off2 = 0; off2 < MAXOFF; off2 += PS) {
-    try { var p = ks[0].add(off2).readPointer(); if (looksPtr(p)) { var inner = null; try { inner = p.readPointer(); } catch (e) {} ptrOffs.push('0x' + off2.toString(16) + '->' + p + (looksPtr(inner) ? '(->ptr)' : '')); } } catch (e) {}
-  }
-  console.log('[diag] k0 ptr offsets: ' + ptrOffs.join(' '));
-
-  send({ error: 'struct-scan diagnostic complete', image_get_class: accGi });
+  send({ dumped: false, note: 'class_get_name identified', image_get_class: accGi, class_get_name: nameIdx, F: F });
 }
 
 // ---- bootstrap: wait for module + il2cpp init, then calibrate once ----
