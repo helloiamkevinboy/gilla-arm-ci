@@ -98,8 +98,8 @@ jobs:
             fi
             sleep 10
           done
-          echo "=== DUMP: anchor-calibrated class scan via calib9_agent.js ==="
-          timeout 780 python3 -u driver2.py localhost:5555 com.playgilla.gilla calib9_agent.js gilla_dump.cs 720 2>&1 | tee dump_driver.log || echo "driver exit=$?"
+          echo "=== DUMP: corlib-anchored full dump via calib10_agent.js ==="
+          timeout 780 python3 -u driver2.py localhost:5555 com.playgilla.gilla calib10_agent.js gilla_dump.cs 720 2>&1 | tee dump_driver.log || echo "driver exit=$?"
           adb -s localhost:5555 logcat -d > logcat.txt 2>&1 || true
           echo "=== dump head ==="; head -40 gilla_dump.cs 2>/dev/null || echo "(no dump)"
           echo "=== dump size ==="; wc -l gilla_dump.cs 2>/dev/null || true
@@ -107,8 +107,9 @@ jobs:
       - name: Validate (fail if no real dump)
         run: |
           test -s gilla_dump.cs || { echo "::error::gilla_dump.cs missing/empty"; exit 1; }
-          CLS=$(grep -c 'class ' gilla_dump.cs || echo 0)
-          echo "classes in dump: $CLS"
+          CLS=$(grep -c '^===C|' gilla_dump.cs || echo 0)
+          MTH=$(grep -c '^M:' gilla_dump.cs || echo 0)
+          echo "classes in dump: $CLS   methods: $MTH"
           [ "$CLS" -ge 1 ] || { echo "::error::no classes recovered"; exit 1; }
 
       - name: Upload artifacts
