@@ -98,8 +98,8 @@ jobs:
             fi
             sleep 10
           done
-          echo "=== DUMP: structural scan + image-frequency filter via calib7_agent.js ==="
-          timeout 780 python3 -u driver2.py localhost:5555 com.playgilla.gilla calib7_agent.js gilla_dump.cs 720 2>&1 | tee dump_driver.log || echo "driver exit=$?"
+          echo "=== DUMP: byval_arg self-ref class scan via calib8_agent.js ==="
+          timeout 780 python3 -u driver2.py localhost:5555 com.playgilla.gilla calib8_agent.js gilla_dump.cs 720 2>&1 | tee dump_driver.log || echo "driver exit=$?"
           adb -s localhost:5555 logcat -d > logcat.txt 2>&1 || true
           echo "=== dump head ==="; head -40 gilla_dump.cs 2>/dev/null || echo "(no dump)"
           echo "=== dump size ==="; wc -l gilla_dump.cs 2>/dev/null || true
