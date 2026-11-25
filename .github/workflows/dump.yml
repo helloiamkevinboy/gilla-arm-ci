@@ -98,8 +98,8 @@ jobs:
             fi
             sleep 10
           done
-          echo "=== DUMP: calib17 (image-anchored arena scan) ==="
-          timeout 900 python3 -u driver2.py localhost:5555 com.playgilla.gilla calib17_agent.js gilla_dump.cs 840 2>&1 | tee dump_driver.log || echo "driver exit=$?"
+          echo "=== DUMP: calib18 (metadata: types/flags/params/vtables/globals) ==="
+          timeout 1560 python3 -u driver2.py localhost:5555 com.playgilla.gilla calib18_agent.js gilla_dump.cs 1500 2>&1 | tee dump_driver.log || echo "driver exit=$?"
           adb -s localhost:5555 logcat -d > logcat.txt 2>&1 || true
           echo "=== dump head ==="; head -40 gilla_dump.cs 2>/dev/null || echo "(no dump)"
           echo "=== dump size ==="; wc -l gilla_dump.cs 2>/dev/null || true
