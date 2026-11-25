@@ -67,7 +67,7 @@ script.on("message", on_message)
 script.load()
 
 t0 = time.time()
-while not state["done"] and (time.time() - t0) < max_secs:
+while not state["done"] and not state["err"] and (time.time() - t0) < max_secs:
     time.sleep(1)
 
 outf.flush(); outf.close()
