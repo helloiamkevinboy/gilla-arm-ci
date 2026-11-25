@@ -12,8 +12,8 @@ on:
 
 jobs:
   dump:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    runs-on: ubuntu-24.04-arm            # native arm64 (required: game is arm64-only)
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -21,15 +21,13 @@ jobs:
         run: |
           uname -a
           echo "arch: $(dpkg --print-architecture)"
-          echo "--- binder modules available? ---"
           find /lib/modules/$(uname -r) -name '*binder*' 2>/dev/null || true
 
       - name: Load binder + install tools
         run: |
           sudo modprobe binder_linux devices=binder,hwbinder,vndbinder 2>&1 || echo "modprobe binder_linux FAILED"
           sudo modprobe ashmem_linux 2>&1 || echo "(ashmem not needed on new kernels)"
-          echo "--- binder devices ---"
-          ls -l /dev/binder* /dev/*binder* 2>/dev/null || echo "NO binder devices -> redroid will fail"
+          ls -l /dev/binder* /dev/*binder* 2>/dev/null || echo "(no host /dev/binder; redroid --privileged provides it)"
           sudo apt-get update -qq
           sudo apt-get install -y -qq adb xz-utils
           python3 -m pip install --quiet frida-tools
@@ -38,17 +36,12 @@ jobs:
       - name: Start redroid (native arm64 Android)
         run: |
           mkdir -p ~/rd
-          docker run -itd --rm --privileged \
-            --name redroid \
-            -v ~/rd:/data \
-            -p 5555:5555 \
+          docker run -itd --rm --privileged --name redroid -v ~/rd:/data -p 5555:5555 \
             redroid/redroid:${{ github.event.inputs.android }} \
-            androidboot.redroid_gpu_mode=guest \
-            androidboot.redroid_width=720 androidboot.redroid_height=1280
-          echo "waiting for container..."
+            androidboot.redroid_gpu_mode=guest androidboot.redroid_width=720 androidboot.redroid_height=1280
           sleep 15
           docker ps -a
-          echo "--- redroid logs ---"; docker logs redroid 2>&1 | tail -30 || true
+          docker logs redroid 2>&1 | tail -30 || true
 
       - name: ADB connect + wait for boot
         run: |
@@ -56,36 +49,32 @@ jobs:
           adb connect localhost:5555 || true
           sleep 3
           adb connect localhost:5555
-          echo "waiting boot_completed..."
           for i in $(seq 1 60); do
             b=$(adb -s localhost:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             echo "try $i: boot=$b"
             [ "$b" = "1" ] && break
             sleep 5
           done
-          echo "=== ABI (want arm64-v8a, 64-bit) ==="
-          adb -s localhost:5555 shell getprop ro.product.cpu.abi
-          adb -s localhost:5555 shell getprop ro.product.cpu.abilist64
+          echo "ABI: $(adb -s localhost:5555 shell getprop ro.product.cpu.abilist | tr -d '\r')"
+          [ "$(adb -s localhost:5555 shell getprop sys.boot_completed | tr -d '\r')" = "1" ] || { echo "redroid did not boot"; exit 1; }
 
       - name: Install game
         run: |
           URL="${{ github.event.inputs.apk_url }}"
-          echo "apk source: $URL"
           if echo "$URL" | grep -q "drive.google.com"; then
             python3 -m pip install --quiet gdown
             ID=$(echo "$URL" | grep -oE '/d/[^/]+' | cut -d/ -f3)
             [ -z "$ID" ] && ID=$(echo "$URL" | grep -oE 'id=[^&]+' | cut -d= -f2)
-            echo "google drive id: $ID"
             gdown "$ID" -O game.apk
           else
             curl -fL "$URL" -o game.apk
           fi
-          ls -la game.apk
-          file game.apk
+          ls -la game.apk; file game.apk
           adb -s localhost:5555 install -r -g game.apk
 
       - name: frida-server + dump
         run: |
+          set -x
           FV=$(frida --version 2>/dev/null || echo 17.2.7)
           echo "frida version: $FV"
           curl -fL -o fs.xz "https://github.com/frida/frida/releases/download/${FV}/frida-server-${FV}-android-arm64.xz" || \
@@ -96,21 +85,31 @@ jobs:
           adb -s localhost:5555 connect localhost:5555 || true
           adb -s localhost:5555 push fs /data/local/tmp/frida-server
           adb -s localhost:5555 shell chmod 755 /data/local/tmp/frida-server
-          adb -s localhost:5555 shell "setsid /data/local/tmp/frida-server >/dev/null 2>&1 &" || \
-            adb -s localhost:5555 shell "/data/local/tmp/frida-server &" &
+          adb -s localhost:5555 shell "setsid /data/local/tmp/frida-server >/data/local/tmp/fs.log 2>&1 &" || \
+            ( adb -s localhost:5555 shell "/data/local/tmp/frida-server &" & )
           sleep 6
-          echo "=== DUMP: self-calibrating il2cpp dumper ==="
-          python3 driver.py localhost:5555 com.playgilla.gilla calib_agent.js 2>&1 | tail -400
+          echo "=== launch game (il2cpp_init runs early, before XR) ==="
+          adb -s localhost:5555 logcat -c || true
+          adb -s localhost:5555 shell am start -n com.playgilla.gilla/com.unity3d.player.UnityPlayerGameActivity || true
+          for i in $(seq 1 30); do
+            PID=$(adb -s localhost:5555 shell pidof com.playgilla.gilla | tr -d '\r')
+            if [ -n "$PID" ] && adb -s localhost:5555 shell "cat /proc/$PID/maps 2>/dev/null | grep -q libil2cpp.so"; then
+              echo "libil2cpp mapped in pid $PID after ${i}0s"; break
+            fi
+            sleep 10
+          done
+          echo "=== DUMP: calibrating + streaming via dump_agent.js ==="
+          timeout 660 python3 -u driver2.py localhost:5555 com.playgilla.gilla dump_agent.js gilla_dump.cs 600 2>&1 | tee dump_driver.log || echo "driver exit=$?"
+          adb -s localhost:5555 logcat -d > logcat.txt 2>&1 || true
+          echo "=== dump head ==="; head -40 gilla_dump.cs 2>/dev/null || echo "(no dump)"
+          echo "=== dump size ==="; wc -l gilla_dump.cs 2>/dev/null || true
 
-      - name: Pull artifacts
-        if: always()
+      - name: Validate (fail if no real dump)
         run: |
-          adb -s localhost:5555 pull /data/data/com.playgilla.gilla/exports.txt exports.txt 2>/dev/null && echo "got exports" || echo "no exports"
-          adb -s localhost:5555 pull /data/data/com.playgilla.gilla/meta_region.dat meta_region.dat 2>/dev/null && echo "got meta_region" || echo "no meta_region"
-          adb -s localhost:5555 pull /data/data/com.playgilla.gilla/gilla_dump.cs gilla_dump.cs 2>/dev/null || echo "no dump at app dir"
-          adb -s localhost:5555 pull /data/local/tmp/gilla_dump.cs gilla_dump.cs 2>/dev/null || true
-          ls -la exports.txt meta_region.dat gilla_dump.cs 2>/dev/null || true
-          echo "--- redroid logs tail ---"; docker logs redroid 2>&1 | tail -15 || true
+          test -s gilla_dump.cs || { echo "::error::gilla_dump.cs missing/empty"; exit 1; }
+          CLS=$(grep -c 'class ' gilla_dump.cs || echo 0)
+          echo "classes in dump: $CLS"
+          [ "$CLS" -ge 1 ] || { echo "::error::no classes recovered"; exit 1; }
 
       - name: Upload artifacts
         if: always()
@@ -118,7 +117,7 @@ jobs:
         with:
           name: gilla-dump
           path: |
-            exports.txt
-            meta_region.dat
             gilla_dump.cs
+            dump_driver.log
+            logcat.txt
           if-no-files-found: warn
